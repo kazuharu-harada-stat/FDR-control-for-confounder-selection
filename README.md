@@ -28,10 +28,8 @@ This repository provides R source codes to reproduce numerical experiments and r
 - q_values_for_Causal.R
 
 ### Utilities
-functions_simulation.R
-utils.R
-
-各手法のスクリプト
+- functions_simulation.R
+- utils.R
 
 ## Contact info.
 Kazuharu Harada (haradak@tokyo-med.ac.jp)
