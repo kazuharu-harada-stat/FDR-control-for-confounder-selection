@@ -1,0 +1,695 @@
+---
+title: "rhc"
+author: "Kazuharu Harada"
+date: "2023-xx-xx"
+output: 
+  powerpoint_presentation:
+    reference_doc: ../template_UD.pptx
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = TRUE,
+  warning = TRUE,
+  dpi=500,
+  fig.width = 8,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xtable)
+library(gridExtra)
+library(scales)
+library(broom)
+library(boot)
+library(doParallel)
+library(doRNG)
+source("../../src/utils.R")
+source("../../src/DataSplit.R")
+
+path_input <- "../../data/rhc/"
+path_output <- "./output/"
+
+
+```
+
+## SessionInfo
+
+```{r}
+sessionInfo()
+```
+
+## Load Data
+
+```{r}
+
+df_raw <- read_csv(paste0(path_input,"rhc.csv"))
+str(df_raw)
+
+```
+
+
+
+## head
+
+```{r}
+head(df_raw)
+```
+
+## summary
+
+```{r}
+summary(df_raw)
+```
+
+
+
+## 前処理
+
+```{r}
+# ADL and DASI
+# were imputed based
+# on multivariable
+# regres¬ sion models containing diagnoses,
+# age, comorbid illness, Glasgow Coma Score, Acute Physiology Score, and site.16
+
+# table(df_raw$cat2, useNA="always")
+# table(df_raw$cat1, useNA="always")
+
+df_proc <- df_raw %>% 
+  mutate(
+    death_30days = factor(ifelse(dth30=="Yes",1,0), levels=c(0,1)),
+    RHC = factor(ifelse(swang1=="RHC","Yes","No"), levels=c("No","Yes")),
+    age = age,
+    sex = factor(sex, levels=c("Male","Female")),
+    race = factor(race, levels=c("white","black","other")),
+    edu = edu, 
+    income = factor(income, levels=names(sort(table(df_raw$income), decreasing = TRUE))),
+    insurance = factor(ninsclas, levels=names(sort(table(df_raw$ninsclas), decreasing = TRUE))),
+    # cat1 = factor(cat1, levels=sort(unique(df_raw$cat1))),
+    cat1mod = factor(
+      case_when(
+        cat1 == "ARF" ~ "ARF",
+        cat1 %in% c("MOSF w/Malignancy", "MOSF w/Sepsis") ~ "MOSF",
+        cat1 == "CHF" ~ "CHF",
+        TRUE ~ "Other"
+      ), levels=c("Other", "ARF", "MOSF", "CHF")),
+    # cat2 is excluded due to massing missing data
+    # cat2 = factor(ifelse(is.na(cat2), "none", cat2), levels=c("none",sort(unique(df_raw$cat2)))),
+    cat2mod = factor(
+      case_when(
+        is.na(cat2) ~ "None",
+        cat2 %in% c("MOSF w/Malignancy", "MOSF w/Sepsis") ~ "MOSF",
+        TRUE ~ "Other"
+      ), levels=c("None","Other", "MOSF")),
+    resp = factor(resp, levels=c("No", "Yes")),
+    card = factor(card, levels=c("No", "Yes")),
+    neuro = factor(neuro, levels=c("No", "Yes")),
+    gastr = factor(gastr, levels=c("No", "Yes")),
+    renal = factor(renal, levels=c("No", "Yes")),
+    meta = factor(meta, levels=c("No", "Yes")),
+    hema = factor(hema, levels=c("No", "Yes")),
+    seps = factor(seps, levels=c("No", "Yes")),
+    # trauma and ortho are excluded due to small number of patients
+    # trauma = factor(trauma, levels=c("No", "Yes")),
+    # ortho = factor(ortho, levels=c("No", "Yes")),
+    # adld3p is excluded due to massing missing data
+    das2d3pc = das2d3pc,
+    dnr1 = factor(dnr1, levels=c("No", "Yes")),
+    cancer = factor(ca, levels=c("No", "Yes", "Metastatic")),
+    surv2md1 = surv2md1,
+    aps1 = aps1,
+    scoma1 = scoma1,
+    wtkilo1 = wtkilo1,
+    temp1 = temp1,
+    meanbp1 = meanbp1,
+    resp1 = resp1,
+    hrt1 = hrt1,
+    pafi1 = pafi1,
+    paco21 = paco21,
+    ph1 = ph1,
+    wblc1 = wblc1,
+    hema1 = hema1,
+    sod1 = sod1,
+    pot1 = pot1,
+    crea1 = crea1,
+    bili1 = bili1,
+    alb1 = alb1,
+    # urin1 is excluded due to massing missing data
+    cardiohx = factor(cardiohx),
+    chfhx = factor(chfhx),
+    dementhx = factor(dementhx),
+    psychhx = factor(psychhx),
+    chrpulhx = factor(chrpulhx), 
+    renalhx = factor(renalhx), 
+    liverhx = factor(liverhx), 
+    gibledhx = factor(gibledhx),
+    malighx = factor(malighx),
+    immunhx = factor(immunhx), 
+    transhx = factor(transhx), 
+    amihx = factor(amihx),
+  ) %>% dplyr::select(
+    death_30days, RHC, age, sex, race, edu, income, insurance, 
+    cat1mod, cat2mod, resp, card, neuro, renal, meta, hema, seps, 
+    das2d3pc, dnr1, cancer, surv2md1, aps1, scoma1, temp1, meanbp1, resp1, hrt1, 
+    pafi1, paco21, ph1, wblc1, hema1, sod1, pot1, crea1, bili1, alb1, 
+    cardiohx, chfhx, dementhx, psychhx, chrpulhx, renalhx, liverhx, gibledhx,
+    malighx, immunhx, transhx, amihx
+  )
+
+dim(df_proc)
+summary(df_proc)
+
+```
+
+## アウトカムの集計
+
+```{r}
+
+knitr::kable(table(df_proc$death_30days, df_proc$RHC))
+
+```
+
+## ワークスペースを読み込み
+
+```{r}
+
+load("./checkpoint/checkpoint_20240422.RData")
+
+```
+
+
+## 解析結果を可視化
+
+```{r}
+X.mat <- model.matrix(as.formula(~ .), data = df_proc[,-c(1,2)])
+X.mat <- X.mat[,-c(1)]
+T.vec <- df_proc$RHC
+y.vec <- df_proc$death_30days
+
+write.csv(data.frame(X.mat), "./names.csv")
+
+
+dimX <- dim(X.mat)[2]
+
+fit_to_df <- function(fit_boot, method, criteria, dimX, FDR, metlabel){
+  
+  one_to_df <- function(estimates, method, criteria, dimX, FDR, boot_idx){
+    ret <- data.frame(
+      names = rep(c("RD_Std","RD_IPW","RD_AIPW","RR_Std","RR_IPW","RR_AIPW","OR_Std","OR_IPW","OR_AIPW",
+                paste0(1:dimX)),length(criteria)),
+      method = method,
+      criteria = rep(criteria, each = (9 + dimX)),
+      values = estimates,
+      FDR = FDR,
+      boot_idx = boot_idx
+    )
+    return(ret)
+  }
+  df_fit_0 <- one_to_df(fit_boot$t0, method=method,criteria=criteria, dimX=dimX, FDR, boot_idx = 0)
+  df_fit_boot <- foreach(b=1:1000, .combine = rbind)%do%{
+      one_to_df(fit_boot$t[b,], method=method, criteria=criteria, dimX=dimX, FDR, boot_idx = b)
+  }
+  ret <- rbind(df_fit_0,df_fit_boot)
+  return(ret)
+}
+
+df_full_AND <- fit_to_df(fit.adj_full.boot, method="Full model", criteria="AND", FDR=0.0, dimX=dimX)
+df_full_OR <- fit_to_df(fit.adj_full.boot, method="Full model", criteria="OR", FDR=0.0, dimX=dimX)
+
+df_unadj_AND <- fit_to_df(fit.unadj.boot, method="Not adjusted", criteria="AND", FDR=0.0, dimX=dimX)
+df_unadj_OR <- fit_to_df(fit.unadj.boot, method="Not adjusted", criteria="OR", FDR=0.0, dimX=dimX)
+
+crit_Q <- c("AND/BH","OR/BH","AND/BY","OR/BY")
+df_fullQ_01 <- fit_to_df(fit.adj_fullQ.boot.01, method="fullQ", criteria=crit_Q, FDR=0.1, dimX=dimX)
+df_fullQ_02 <- fit_to_df(fit.adj_fullQ.boot.02, method="fullQ", criteria=crit_Q, FDR=0.2, dimX=dimX)
+df_fullQ_03 <- fit_to_df(fit.adj_fullQ.boot.03, method="fullQ", criteria=crit_Q, FDR=0.3, dimX=dimX)
+
+crit_Q <- c("AND/BH","OR/BH","AND/BY","OR/BY")
+df_marQ_01 <- fit_to_df(fit.adj_marQ.boot.01, method="marQ", criteria=crit_Q, FDR=0.1, dimX=dimX)
+df_marQ_02 <- fit_to_df(fit.adj_marQ.boot.02, method="marQ", criteria=crit_Q, FDR=0.2, dimX=dimX)
+df_marQ_03 <- fit_to_df(fit.adj_marQ.boot.03, method="marQ", criteria=crit_Q, FDR=0.3, dimX=dimX)
+
+crit_Q <- c("AND/paired","OR/paired", "AND/unified","OR/unified")
+df_DS_01 <- fit_to_df(fit.adj_DS.boot.01, method="DS", criteria=crit_Q, FDR=0.1, dimX=dimX)
+df_DS_02 <- fit_to_df(fit.adj_DS.boot.02, method="DS", criteria=crit_Q, FDR=0.2, dimX=dimX)
+df_DS_03 <- fit_to_df(fit.adj_DS.boot.03, method="DS", criteria=crit_Q, FDR=0.3, dimX=dimX)
+
+crit_Q <- c("AND/paired","OR/paired", "AND/unified","OR/unified")
+df_MDS_01 <- fit_to_df(fit.adj_MDS.boot.01, method="MDS", criteria=crit_Q, FDR=0.1, dimX=dimX)
+df_MDS_02 <- fit_to_df(fit.adj_MDS.boot.02, method="MDS", criteria=crit_Q, FDR=0.2, dimX=dimX)
+df_MDS_03 <- fit_to_df(fit.adj_MDS.boot.03, method="MDS", criteria=crit_Q, FDR=0.3, dimX=dimX)
+
+metlabels1=c("Not adjusted","Full model",
+             "DS (OR, paired)", "DS (OR, unified)", "MDS (OR, paired)", "MDS (OR, unified)", 
+            "BHq (OR, full)", "BHq (OR, marginal)", "BYq (OR, full)", "BYq (OR, marginal)",
+            "DS (AND, paired)", "DS (AND, unified)", "MDS (AND, paired)", "MDS (AND, unified)", 
+            "BHq (AND, full)", "BHq (AND, marginal)", "BYq (AND, full)", "BYq (AND, marginal)")
+
+metlabels2=c("Not adjusted","Full model",
+             "DS (paired)", "DS (unified)", "MDS (paired)", "MDS (unified)", 
+            "BHq (full)", "BHq (marginal)", "BYq (full)", "BYq (marginal)")
+
+
+df_boot_all <- rbind(
+  df_full_AND,df_full_OR,
+  df_unadj_AND,df_unadj_OR,
+  df_fullQ_01,df_fullQ_02,df_fullQ_03,
+  df_marQ_01,df_marQ_02,df_marQ_03,
+  df_DS_01,df_DS_02,df_DS_03,
+  df_MDS_01,df_MDS_02,df_MDS_03
+) %>% mutate(
+  metlabel1 = factor(case_when(
+    method %in% c("Full model", "Not adjusted") ~ method,
+    method == "fullQ" ~ paste0(str_split_i(criteria,"/",2),"q (",str_split_i(criteria,"/",1), ", full)"),
+    method == "marQ" ~ paste0(str_split_i(criteria,"/",2),"q (",str_split_i(criteria,"/",1), ", marginal)"),
+    method == "DS" ~ paste0("DS (", str_split_i(criteria,"/",1),", ",str_split_i(criteria,"/",2), ")"),
+    method == "MDS" ~ paste0("MDS (", str_split_i(criteria,"/",1),", ",str_split_i(criteria,"/",2), ")")
+  ), levels=metlabels1),
+  metlabel2 = factor(case_when(
+    method %in% c("Full model", "Not adjusted") ~ method,
+    method == "fullQ" ~ paste0(str_split_i(criteria,"/",2),"q (full)"),
+    method == "marQ" ~ paste0(str_split_i(criteria,"/",2),"q (marginal)"),
+    method == "DS" ~ paste0("DS (",str_split_i(criteria,"/",2), ")"),
+    method == "MDS" ~ paste0("MDS (",str_split_i(criteria,"/",2), ")")
+  ), levels=metlabels2),
+  AND_OR = factor(case_when(
+    method %in% c("Full model", "Not adjusted") ~ criteria,
+    TRUE ~ str_split_i(criteria,"/",1)
+  ), levels=c("OR","AND"), labels=c("Union set approach", "Minimal set approach"))
+)
+
+```
+
+## 選択割合
+
+```{r,   dpi=500,  fig.width = 8,  fig.height = 5}
+
+df_selection_prp <- df_boot_all %>%
+  filter(boot_idx > 0, !(str_sub(names,1,1) %in% c("R","O")),
+         !(method %in% c("Not adjusted", "Full model"))) %>%
+  group_by(AND_OR, metlabel2, FDR, names) %>% 
+  summarise(meanval = mean(values)) %>% ungroup()
+
+# table(df_selection_prp$metlabel,useNA = "always")
+
+gg <- df_selection_prp %>%
+  ggplot(aes(x=factor(names,levels=paste0(1:dimX)), y=FDR, fill=meanval)) + 
+  geom_tile() +
+  facet_grid(metlabel2 ~ AND_OR, switch = "y") +
+  scale_fill_gradient(low="white",high = "gray30") +
+  scale_x_discrete(breaks = paste0(c(1,seq(10,50,10),58))) +
+  theme_test() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.spacing.x = unit(1, "lines"),
+    text = element_text(size=16),
+    legend.position = "none",
+    strip.text.y.left = element_text(angle = 0, hjust = 0),
+    strip.placement = "outside",
+    strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+  ) +
+  labs(x=NULL,y=NULL)
+
+ggsave("./fig/fig_rhc_selectionprob.pdf", gg, device="pdf",
+         dpi=500, units = "mm", width = 240, height = 160)
+
+```
+
+
+## ATE推定値
+
+```{r,   dpi=500,  fig.width = 8,  fig.height = 6}
+
+draw_estimates <- function(measure){
+  df_point <- df_boot_all %>%
+    filter(boot_idx == 0, names == measure)
+
+  df_percentile <- df_boot_all %>%
+    filter(boot_idx > 0, names == measure) %>% 
+    group_by(AND_OR, metlabel2, FDR, names) %>% 
+    summarise(
+      cnt = n(),
+      q025 = quantile(values, probs = 0.025),
+      q975 = quantile(values, probs = 0.975)) %>%
+    ungroup()
+  
+  keys = c("names", "method", "criteria", "FDR", "metlabel1", "metlabel2", "AND_OR")
+  df_SE <- df_boot_all %>%
+    filter(boot_idx > 0, names == measure) %>% 
+    left_join(df_point %>% rename(refval=values), by=keys) %>% 
+    group_by(metlabel2,names,FDR,AND_OR) %>% 
+    summarise(
+      cnt = n(),
+      bSE = sqrt(sum((values - refval)^2))
+    )
+  
+  
+  gg <- df_point %>%
+    ggplot(aes(x=values, y=factor(FDR,levels=c("na","0.1","0.2","0.3")))) + 
+    geom_point(size=3,shape=18) +
+    geom_errorbar(data = df_percentile, aes(x=NULL,xmin=q025,xmax=q975)) +
+    geom_text(data = df_SE, aes(x=max(df_percentile$q975)*1.1,label=sprintf("(%.2f) ",round(bSE,2)))) +
+    facet_grid(metlabel2 ~ AND_OR, switch = "y", scales = "free_y") +
+    xlim(min(df_percentile$q025)*0.95,max(df_percentile$q975)*1.15) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.spacing.x = unit(1, "lines"),
+      text = element_text(size=16),
+      legend.position = "none",
+      strip.text.y.left = element_text(angle = 0, hjust = 0),
+      strip.placement = "outside",
+      strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+    ) +
+    labs(x=NULL,y=NULL)
+
+  ggsave(sprintf("./fig/fig_rhc_ATE_%s.pdf",measure), gg, device="pdf",
+         dpi=500, units = "mm", width = 240, height = 160)
+}
+
+measures <- c("RD_Std","RD_IPW","RD_AIPW","RR_Std","RR_IPW","RR_AIPW","OR_Std","OR_IPW","OR_AIPW")
+
+for (mm in measures) {
+  draw_estimates(measure=mm)
+}
+
+
+```
+
+
+
+## ATE推定値
+
+```{r,   dpi=500,  fig.width = 8,  fig.height = 6}
+
+draw_estimates <- function(measure){
+  df_point <- df_boot_all %>%
+    filter(boot_idx == 0, names == measure)
+
+  df_percentile <- df_boot_all %>%
+    filter(boot_idx > 0, names == measure) %>% 
+    group_by(AND_OR, metlabel2, FDR, names) %>% 
+    summarise(
+      cnt = n(),
+      q025 = quantile(values, probs = 0.025),
+      q975 = quantile(values, probs = 0.975)) %>%
+    ungroup()
+  
+  gg <- df_point %>%
+    ggplot(aes(x=values, y=factor(FDR,levels=c("na","0.1","0.2","0.3")))) + 
+    geom_point(size=3,shape=18) +
+    geom_errorbar(data = df_percentile, aes(x=NULL,xmin=q025,xmax=q975)) +
+    facet_grid(metlabel2 ~ AND_OR, switch = "y", scales = "free_y") +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.spacing.x = unit(1, "lines"),
+      text = element_text(size=16),
+      legend.position = "none",
+      strip.text.y.left = element_text(angle = 0, hjust = 0),
+      strip.placement = "outside",
+      strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+    ) +
+    labs(x=NULL,y=NULL)
+
+  ggsave(sprintf("./fig/fig_rhc_ATE_%s_noSE.pdf",measure), gg, device="pdf",
+         dpi=500, units = "mm", width = 240, height = 160)
+}
+
+measures <- c("RD_Std","RD_IPW","RD_AIPW","RR_Std","RR_IPW","RR_AIPW","OR_Std","OR_IPW","OR_AIPW")
+
+for (mm in measures) {
+  draw_estimates(measure=mm)
+}
+
+
+
+```
+
+
+## 準備
+
+```{r}
+df_selected_01 <- data.frame(
+  var_idx = 1:dimX,
+  var_names = colnames(X.mat),
+  FDR = 0.1,
+  fullQ_BH_AND = (1:dimX %in% ls_selected_fullQ$AND_fullBHq)*1,
+  fullQ_BH_OR = (1:dimX %in% ls_selected_fullQ$OR_fullBHq)*1,
+  fullQ_BY_AND = (1:dimX %in% ls_selected_fullQ$AND_fullBYq)*1,
+  fullQ_BY_OR = (1:dimX %in% ls_selected_fullQ$OR_fullBYq)*1,
+  marQ_BH_AND = (1:dimX %in% ls_selected_marQ$AND_marBHq)*1,
+  marQ_BH_OR = (1:dimX %in% ls_selected_marQ$OR_marBHq)*1,
+  marQ_BY_AND = (1:dimX %in% ls_selected_marQ$AND_marBYq)*1,
+  marQ_BY_OR = (1:dimX %in% ls_selected_marQ$OR_marBYq)*1,
+  DS_Paired_AND = (1:dimX %in% ls_selected_DS$AND_Paired_sum_NA_NA_NA)*1,
+  DS_Paired_OR = (1:dimX %in% ls_selected_DS$OR_Paired_sum_NA_NA_NA)*1,
+  DS_Unified_AND = (1:dimX %in% ls_selected_DS$AND_Unified_product_min_sgn_sgn)*1,
+  DS_Unified_OR = (1:dimX %in% ls_selected_DS$OR_Unified_product_rad_cos_NA)*1,
+  MDS_Paired_AND = (1:dimX %in% ls_selected_MDS$AND_Paired_sum_NA_NA_NA)*1,
+  MDS_Paired_OR = (1:dimX %in% ls_selected_MDS$OR_Paired_sum_NA_NA_NA)*1,
+  MDS_Unified_AND = (1:dimX %in% ls_selected_MDS$AND_Unified_product_min_sgn_sgn)*1,
+  MDS_Unified_OR = (1:dimX %in% ls_selected_MDS$OR_Unified_product_rad_cos_NA)*1
+)
+
+df_selected_02 <- data.frame(
+  var_idx = 1:dimX,
+  var_names = colnames(X.mat),
+  FDR = 0.2,
+  fullQ_BH_AND = (1:dimX %in% ls_selected_fullQ02$AND_fullBHq)*1,
+  fullQ_BH_OR = (1:dimX %in% ls_selected_fullQ02$OR_fullBHq)*1,
+  fullQ_BY_AND = (1:dimX %in% ls_selected_fullQ02$AND_fullBYq)*1,
+  fullQ_BY_OR = (1:dimX %in% ls_selected_fullQ02$OR_fullBYq)*1,
+  marQ_BH_AND = (1:dimX %in% ls_selected_marQ02$AND_marBHq)*1,
+  marQ_BH_OR = (1:dimX %in% ls_selected_marQ02$OR_marBHq)*1,
+  marQ_BY_AND = (1:dimX %in% ls_selected_marQ02$AND_marBYq)*1,
+  marQ_BY_OR = (1:dimX %in% ls_selected_marQ02$OR_marBYq)*1,
+  DS_Paired_AND = (1:dimX %in% ls_selected_DS02$AND_Paired_sum_NA_NA_NA)*1,
+  DS_Paired_OR = (1:dimX %in% ls_selected_DS02$OR_Paired_sum_NA_NA_NA)*1,
+  DS_Unified_AND = (1:dimX %in% ls_selected_DS02$AND_Unified_product_min_sgn_sgn)*1,
+  DS_Unified_OR = (1:dimX %in% ls_selected_DS02$OR_Unified_product_rad_cos_NA)*1,
+  MDS_Paired_AND = (1:dimX %in% ls_selected_MDS02$AND_Paired_sum_NA_NA_NA)*1,
+  MDS_Paired_OR = (1:dimX %in% ls_selected_MDS02$OR_Paired_sum_NA_NA_NA)*1,
+  MDS_Unified_AND = (1:dimX %in% ls_selected_MDS02$AND_Unified_product_min_sgn_sgn)*1,
+  MDS_Unified_OR = (1:dimX %in% ls_selected_MDS02$OR_Unified_product_rad_cos_NA)*1
+)
+
+df_selected <- rbind(df_selected_01,df_selected_02)
+
+write_csv(df_selected, "./output/selected_varaibles.csv")
+
+df_long <- df_selected %>%
+  pivot_longer(cols=all_of(colnames(df_selected[,-c(1,2,3)]))) %>% 
+  separate(name, into = c("algorithm","method","criteria"), sep = "_", remove = FALSE) %>% 
+  mutate(
+    xlabel = ifelse(algorithm %in% c("fullQ","marQ")
+      , sprintf("%s%s (%s)", method, "q",
+                ifelse(algorithm=="fullQ","full","marginal"))
+      , sprintf("%s (%s)", algorithm, method)
+    ),
+    xorder = case_when(
+      algorithm == "marQ" ~ 4,
+      algorithm == "fullQ" ~ 3,
+      algorithm == "DS" ~ 2,
+      algorithm == "MDS" ~ 1
+    )
+  ) %>% 
+  arrange(criteria, xorder, desc(method))
+df_long$xlabel <- factor(df_long$xlabel, levels=unique(df_long$xlabel))
+
+
+
+gg1 <- df_long %>% 
+  filter(criteria == "OR") %>% 
+  ggplot(aes(x=var_idx,y=factor(FDR,levels=c(0.2,0.1)),fill=factor(value))) +
+  geom_tile(col="white") + 
+  facet_grid(xlabel ~ ., switch = "y") +
+  scale_fill_manual(values=c("transparent","gray50")) +
+  scale_x_continuous(limits = c(0.5,58.5), breaks = c(1,5,10,15,20,25,30,35,40,45,50,55,58)) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    text = element_text(size=18),
+    # axis.text.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text.y.left = element_text(angle = 0, hjust = 1),
+    strip.placement = "outside",
+    strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+  ) +
+  labs(x=NULL, y="Union set approach")
+  
+
+gg2  <- df_long %>% 
+  filter(criteria == "AND") %>% 
+  ggplot(aes(x=var_idx,y=factor(FDR,levels=c(0.2,0.1)),fill=factor(value))) +
+  geom_tile(col="white") + 
+  facet_grid(xlabel ~ ., switch = "y") +
+  scale_fill_manual(values=c("transparent","gray50")) +
+  scale_x_continuous(limits = c(0.5,58.5), breaks = c(1,5,10,15,20,25,30,35,40,45,50,55,58)) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    text = element_text(size=18),
+    # axis.text.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text.y.left = element_text(angle = 0, hjust = 1),
+    strip.placement = "outside",
+    strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+  ) +
+  labs(x=NULL, y="Minimal set approach")
+
+
+
+gg <- grid.arrange(gg1, gg2, ncol=1)
+
+ggsave("./fig/fig_rhc_selected.pdf",gg, device="pdf",
+       dpi=500, units = "mm", width = 240, height = 200)
+
+```
+
+
+## 解析結果を可視化（bootstrap）
+
+```{r, warning=FALSE}
+getBootCI <- function(boot.out, valnames){
+  df_bootci <- NULL
+  for (j in 1:dim(boot.out$t)[2]) {
+    bci <- boot.ci(boot.out, type="perc", index = j)
+    df_tmp <- data.frame(
+      vname = valnames[j],
+      estimate = bci$t0,
+      CIL = bci$percent[4],
+      CIU = bci$percent[5]
+    )
+    df_bootci <- rbind(df_bootci, df_tmp)
+  }
+  df_bootci$measure_method <- names(boot.out$t0)
+  return(df_bootci)
+}
+
+valnames = rep("unadjusted_NA_NA_XXX", length(fit.unadj.boot$t0))
+df_boot_unadj_01 <- getBootCI(fit.unadj.boot, valnames) %>% mutate(FDR=0.1)
+df_boot_unadj_02 <- getBootCI(fit.unadj.boot, valnames) %>% mutate(FDR=0.2)
+
+
+valnames = rep("adjusted_full_NA_XXX", length(fit.adj_full.boot$t0))
+df_boot_full_01 <- getBootCI(fit.adj_full.boot, valnames) %>% mutate(FDR=0.1)
+df_boot_full_02 <- getBootCI(fit.adj_full.boot, valnames) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("BHq","BYq"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_marQ", s2, s1, sep="_"))
+df_boot_marQ_01 <- getBootCI(fit.adj_marQ.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_marQ_02 <- getBootCI(fit.adj_marQ.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("BHq","BYq"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_fullQ", s2, s1, sep="_"))
+df_boot_fullQ_01 <- getBootCI(fit.adj_fullQ.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_fullQ_02 <- getBootCI(fit.adj_fullQ.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("Paired","Unified"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_DS", s2, s1, sep="_"))
+df_boot_DS_01 <- getBootCI(fit.adj_DS.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_DS_02 <- getBootCI(fit.adj_DS.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("Paired","Unified"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_MDS", s2, s1, sep="_"))
+df_boot_MDS_01 <- getBootCI(fit.adj_MDS.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_MDS_02 <- getBootCI(fit.adj_MDS.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+# measure="RR";method="IPW"
+getEstimates <- function(measure, method){
+  if (measure == "RD") {
+    x_axis_label = "Risk difference with bootstrap 95%CI"
+  } else if (measure == "RR"){
+    x_axis_label = "Risk ratio with bootstrap 95%CI"
+  } else if (measure == "OR"){
+    x_axis_label = "Odds ratio with bootstrap 95%CI"
+  }
+
+  df_blank1_01 = data.frame(vname="blank_NA_NA_XXX",estimate=NA,CIL=NA,CIU=NA,FDR=0.1,
+                         measure_method=paste(measure, method, sep="_"))
+  df_blank1_02 = data.frame(vname="blank_NA_NA_XXX",estimate=NA,CIL=NA,CIU=NA,FDR=0.2,
+                         measure_method=paste(measure, method, sep="_"))
+  
+  df_blank2_01 = data.frame(vname="blank_NA_NA_OR",estimate=NA,CIL=NA,CIU=NA,FDR=0.1,
+                         measure_method=paste(measure, method, sep="_"))
+  df_blank2_02 = data.frame(vname="blank_NA_NA_OR",estimate=NA,CIL=NA,CIU=NA,FDR=0.2,
+                         measure_method=paste(measure, method, sep="_"))
+
+  df_gg <- rbind(
+    df_boot_unadj_01, df_boot_full_01,df_blank1_01,
+    df_boot_marQ_01, df_boot_fullQ_01,
+    df_boot_DS_01, df_boot_MDS_01, df_blank2_01,
+    df_boot_unadj_02, df_boot_full_02,df_blank1_02,
+    df_boot_marQ_02, df_boot_fullQ_02,
+    df_boot_DS_02, df_boot_MDS_02, df_blank2_02
+    ) %>%
+    separate(vname, into = paste0("type",1:4), sep="_", remove = FALSE) %>%
+    separate(measure_method, into = c("type5","type6"), sep="_", remove = FALSE) %>%
+    arrange(desc(type4)) %>%
+    filter(type5 == measure, type6 == method) %>% 
+    mutate(ylabel = case_when(
+      type1 == "blank" & type4 == "XXX" ~ " ",
+      type1 == "blank" & type4 == "OR" ~ "  ",
+      type1 == "unadjusted" ~ "Unadjusted",
+      type2 == "original" ~ "Adjusted (original covariates)",
+      type2 == "full" ~ "Adjusted (full covariates)",
+      type2 == "marQ" ~ sprintf("Adjusted (%s, %s) for %s", type3, "marginal", type4),
+      type2 == "fullQ" ~ sprintf("Adjusted (%s, %s) for %s", type3, "full", type4),
+      type2 == "DS" ~ sprintf("Adjusted (%s, %s) for %s", type2, type3, type4),
+      type2 == "MDS" ~ sprintf("Adjusted (%s, %s) for %s", type2, type3, type4)
+    ))
+  df_gg$ylabel <- factor(df_gg$ylabel, levels=rev(df_gg$ylabel[df_gg$FDR==0.1]))
+
+  gg <- df_gg %>%
+    ggplot(aes(y=ylabel)) +
+    geom_point(aes(x=estimate)) +
+    geom_errorbar(aes(xmin=CIL, xmax=CIU), width=0.25) +
+    # geom_vline(aes(xintercept = df_gg[df_gg$type2 == "full","estimate"]),
+    #            col="red", linetype="dashed")+
+    facet_grid(. ~ FDR) +
+    theme_bw() +
+    theme(
+      text = element_text(size=20)
+    ) +
+    labs(x=x_axis_label, y=NULL)
+  
+  ggsave(sprintf("./fig/fig_rhc_%s_%s.pdf", measure, method), gg, device="pdf",
+         dpi=500, units = "mm", width = 240, height = 160)
+  
+}
+
+getEstimates(measure="RR", method="IPW")
+
+```
+
+
+## 解析結果を可視化（bootstrap）
+
+```{r, warning=FALSE}
+
+for (measure in c("RD","RR","OR")) {
+  for (method in c("Std", "IPW", "AIPW")) {
+    getEstimates(measure=measure, method=method)
+  }
+}
+
+```
+
+

@@ -1,0 +1,868 @@
+---
+title: "rhc"
+author: "Kazuharu Harada"
+date: "2023-xx-xx"
+output: 
+  powerpoint_presentation:
+    reference_doc: ../template_UD.pptx
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = TRUE,
+  warning = TRUE,
+  dpi=500,
+  fig.width = 8,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xtable)
+library(gridExtra)
+library(scales)
+library(broom)
+library(boot)
+library(doParallel)
+library(doRNG)
+source("../../src/utils.R")
+source("../../src/DataSplit.R")
+
+path_input <- "../../data/rhc/"
+path_output <- "./output/"
+
+
+```
+
+## SessionInfo
+
+```{r}
+sessionInfo()
+```
+
+## Load Data
+
+```{r}
+
+df_raw <- read_csv(paste0(path_input,"rhc.csv"))
+str(df_raw)
+
+```
+
+
+
+## head
+
+```{r}
+head(df_raw)
+```
+
+## summary
+
+```{r}
+summary(df_raw)
+```
+
+
+
+## 前処理
+
+```{r}
+# ADL and DASI
+# were imputed based
+# on multivariable
+# regres¬ sion models containing diagnoses,
+# age, comorbid illness, Glasgow Coma Score, Acute Physiology Score, and site.16
+
+# table(df_raw$cat2, useNA="always")
+# table(df_raw$cat1, useNA="always")
+
+df_proc <- df_raw %>% 
+  mutate(
+    death_30days = factor(ifelse(dth30=="Yes",1,0), levels=c(0,1)),
+    RHC = factor(ifelse(swang1=="RHC","Yes","No"), levels=c("No","Yes")),
+    age = age,
+    sex = factor(sex, levels=c("Male","Female")),
+    race = factor(race, levels=c("white","black","other")),
+    edu = edu, 
+    income = factor(income, levels=names(sort(table(df_raw$income), decreasing = TRUE))),
+    insurance = factor(ninsclas, levels=names(sort(table(df_raw$ninsclas), decreasing = TRUE))),
+    # cat1 = factor(cat1, levels=sort(unique(df_raw$cat1))),
+    cat1mod = factor(
+      case_when(
+        cat1 == "ARF" ~ "ARF",
+        cat1 %in% c("MOSF w/Malignancy", "MOSF w/Sepsis") ~ "MOSF",
+        cat1 == "CHF" ~ "CHF",
+        TRUE ~ "Other"
+      ), levels=c("Other", "ARF", "MOSF", "CHF")),
+    # cat2 is excluded due to massing missing data
+    # cat2 = factor(ifelse(is.na(cat2), "none", cat2), levels=c("none",sort(unique(df_raw$cat2)))),
+    cat2mod = factor(
+      case_when(
+        is.na(cat2) ~ "None",
+        cat2 %in% c("MOSF w/Malignancy", "MOSF w/Sepsis") ~ "MOSF",
+        TRUE ~ "Other"
+      ), levels=c("None","Other", "MOSF")),
+    resp = factor(resp, levels=c("No", "Yes")),
+    card = factor(card, levels=c("No", "Yes")),
+    neuro = factor(neuro, levels=c("No", "Yes")),
+    gastr = factor(gastr, levels=c("No", "Yes")),
+    renal = factor(renal, levels=c("No", "Yes")),
+    meta = factor(meta, levels=c("No", "Yes")),
+    hema = factor(hema, levels=c("No", "Yes")),
+    seps = factor(seps, levels=c("No", "Yes")),
+    # trauma and ortho are excluded due to small number of patients
+    # trauma = factor(trauma, levels=c("No", "Yes")),
+    # ortho = factor(ortho, levels=c("No", "Yes")),
+    # adld3p is excluded due to massing missing data
+    das2d3pc = das2d3pc,
+    dnr1 = factor(dnr1, levels=c("No", "Yes")),
+    cancer = factor(ca, levels=c("No", "Yes", "Metastatic")),
+    surv2md1 = surv2md1,
+    aps1 = aps1,
+    scoma1 = scoma1,
+    wtkilo1 = wtkilo1,
+    temp1 = temp1,
+    meanbp1 = meanbp1,
+    resp1 = resp1,
+    hrt1 = hrt1,
+    pafi1 = pafi1,
+    paco21 = paco21,
+    ph1 = ph1,
+    wblc1 = wblc1,
+    hema1 = hema1,
+    sod1 = sod1,
+    pot1 = pot1,
+    crea1 = crea1,
+    bili1 = bili1,
+    alb1 = alb1,
+    # urin1 is excluded due to massing missing data
+    cardiohx = factor(cardiohx),
+    chfhx = factor(chfhx),
+    dementhx = factor(dementhx),
+    psychhx = factor(psychhx),
+    chrpulhx = factor(chrpulhx), 
+    renalhx = factor(renalhx), 
+    liverhx = factor(liverhx), 
+    gibledhx = factor(gibledhx),
+    malighx = factor(malighx),
+    immunhx = factor(immunhx), 
+    transhx = factor(transhx), 
+    amihx = factor(amihx),
+  ) %>% dplyr::select(
+    death_30days, RHC, age, sex, race, edu, income, insurance, 
+    cat1mod, cat2mod, resp, card, neuro, renal, meta, hema, seps, 
+    das2d3pc, dnr1, cancer, surv2md1, aps1, scoma1, temp1, meanbp1, resp1, hrt1, 
+    pafi1, paco21, ph1, wblc1, hema1, sod1, pot1, crea1, bili1, alb1, 
+    cardiohx, chfhx, dementhx, psychhx, chrpulhx, renalhx, liverhx, gibledhx,
+    malighx, immunhx, transhx, amihx
+  )
+
+dim(df_proc)
+summary(df_proc)
+
+```
+
+## アウトカムの集計
+
+```{r}
+
+knitr::kable(table(df_proc$death_30days, df_proc$RHC))
+
+```
+
+## 関数定義
+```{r}
+estimate_eff <- function(data, covariates, outcome="death_30days", treatment="RHC"){
+  if(is.null(covariates)){covariates = c("1")}
+  y = as.numeric(unlist(data[,outcome])) - 1
+  Trt <- as.numeric(unlist(data[,treatment])) - 1
+  
+  # estimate PScore
+  fml <- formula(sprintf("%s ~ %s", treatment, paste(covariates, collapse=" + ")))
+  fit_pscore <- glm(fml, data = data, family = binomial(link="logit"))
+  PScore <- predict(fit_pscore, type="response")
+  
+  # Standardization
+  fml <- formula(sprintf("%s ~ %s + %s", outcome, treatment, paste(covariates, collapse=" + ")))
+  fit_reg <- glm(fml, data = data, family = binomial(link="logit"))
+  
+  df1 <- data; df1[,treatment] <- factor("Yes",levels=c("No","Yes"))
+  df0 <- data; df0[,treatment] <- factor("No",levels=c("No","Yes"))
+  Pred1 <- predict(fit_reg, newdata = df1, type="response")
+  Pred0 <- predict(fit_reg, newdata = df0, type="response")
+  
+  RD_Std <- mean(Pred1 - Pred0)
+  RR_Std <- mean(Pred1)/mean(Pred0)
+  OR_Std <- mean(Pred1)/(1-mean(Pred1))/(mean(Pred0)/(1-mean(Pred0)))
+  
+  # IPW
+  EP1_IPW = sum(y*Trt/PScore)/sum(Trt/PScore)
+  EP0_IPW = sum(y*(1-Trt)/(1-PScore))/sum((1-Trt)/(1-PScore))
+  RD_IPW <- EP1_IPW - EP0_IPW
+  RR_IPW <- EP1_IPW/EP0_IPW
+  OR_IPW <- EP1_IPW/(1-EP1_IPW)/(EP0_IPW/(1-EP0_IPW))
+  
+  # AIPW
+  EP1_AIPW = mean(Pred1 + (y - Pred1)*Trt/PScore)
+  EP0_AIPW = mean(Pred0 + (y - Pred0)*(1-Trt)/(1-PScore))
+  RD_AIPW <- EP1_AIPW - EP0_AIPW
+  RR_AIPW <- EP1_AIPW/EP0_AIPW
+  OR_AIPW <- EP1_AIPW/(1-EP1_AIPW)/(EP0_AIPW/(1-EP0_AIPW))
+  
+  ret <- list(
+    RD_Std = RD_Std, RD_IPW=RD_IPW, RD_AIPW=RD_AIPW,
+    RR_Std = RR_Std, RR_IPW=RR_IPW, RR_AIPW=RR_AIPW,
+    OR_Std = OR_Std, OR_IPW=OR_IPW, OR_AIPW=OR_AIPW
+  )
+  return(ret)
+}
+
+# X=X.mat[,c(1,2,3)]
+# X=X.mat[,c(1)]
+# X=X.mat[,c()]
+# ncol(as.matrix(X))
+
+estimate_eff_mat <- function(y, Trt, X){
+  
+  if(ncol(as.matrix(X)) == 0){ X = rep(1,length(y)) }
+  y = as.numeric(y) - 1
+  Trt <- as.numeric(Trt) - 1
+  
+  # estimate PScore
+  fit_pscore <- glm(Trt ~ X, family = binomial(link="logit"))
+  PScore <- predict(fit_pscore, type="response")
+  
+  # Standardization
+  df_all <- data.frame(Trt, X)
+  fit_reg <- glm(y ~ ., data = df_all, family = binomial(link="logit"))
+  df1 <- data.frame(cbind(1, X)); colnames(df1) <- colnames(df_all)
+  df0 <- data.frame(cbind(0, X)); colnames(df0) <- colnames(df_all)
+  Pred1 <- predict(fit_reg, newdata = df1, type="response")
+  Pred0 <- predict(fit_reg, newdata = df0, type="response")
+  
+  RD_Std <- mean(Pred1 - Pred0)
+  RR_Std <- mean(Pred1)/mean(Pred0)
+  OR_Std <- mean(Pred1)/(1-mean(Pred1))/(mean(Pred0)/(1-mean(Pred0)))
+  
+  # IPW
+  EP1_IPW = sum(y*Trt/PScore)/sum(Trt/PScore)
+  EP0_IPW = sum(y*(1-Trt)/(1-PScore))/sum((1-Trt)/(1-PScore))
+  RD_IPW <- EP1_IPW - EP0_IPW
+  RR_IPW <- EP1_IPW/EP0_IPW
+  OR_IPW <- EP1_IPW/(1-EP1_IPW)/(EP0_IPW/(1-EP0_IPW))
+  
+  # AIPW
+  EP1_AIPW = mean(Pred1 + (y - Pred1)*Trt/PScore)
+  EP0_AIPW = mean(Pred0 + (y - Pred0)*(1-Trt)/(1-PScore))
+  RD_AIPW <- EP1_AIPW - EP0_AIPW
+  RR_AIPW <- EP1_AIPW/EP0_AIPW
+  OR_AIPW <- EP1_AIPW/(1-EP1_AIPW)/(EP0_AIPW/(1-EP0_AIPW))
+  
+  ret <- list(
+    RD_Std = RD_Std, RD_IPW=RD_IPW, RD_AIPW=RD_AIPW,
+    RR_Std = RR_Std, RR_IPW=RR_IPW, RR_AIPW=RR_AIPW,
+    OR_Std = OR_Std, OR_IPW=OR_IPW, OR_AIPW=OR_AIPW
+  )
+  
+  return(ret)
+}
+
+```
+
+
+## 無調整リスク差
+
+```{r}
+
+n_boot = 1000
+n_cores = 12
+
+
+# dat = df_proc; idx=sample(1:58,nrow(df_proc),replace = TRUE)
+func_for_boot <- function(dat,idx){
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+
+  selected = c()
+  
+  tmp <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,selected])
+  ret <- c(unlist(tmp), as.numeric(1:ncol(X.mat) %in% selected))
+  
+  return(ret)
+}
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.unadj.boot <- boot(data=df_proc, statistic=func_for_boot, R=n_boot,
+                       parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+fit.unadj.boot
+
+```
+
+## フルモデル
+
+```{r}
+
+
+# dat = df_proc; idx=sample(1:58,nrow(df_proc),replace = TRUE)
+func_for_boot <- function(dat,idx){
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+
+  varaible_idx = sprintf("X%02d",1:ncol(X.mat))
+  selected = 1:ncol(X.mat)
+  
+  tmp <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,selected])
+  ret <- c(unlist(tmp), as.numeric(1:ncol(X.mat) %in% selected))
+  
+  return(ret)
+}
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.adj_full.boot <- boot(data=df_proc, statistic=func_for_boot,
+                          R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+fit.adj_full.boot
+
+```
+
+
+
+
+## Marginal q-value
+
+```{r, fig.width=10, fig.height=5}
+
+# n_boot
+# dat <- df_proc; idx=sample(1:nrow(df_proc), nrow(df_proc), replace=TRUE);FDR=0.2
+func_for_boot <- function(dat,idx,FDR){
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+  
+  get_marginal_pval_Y <- function(j){
+    fit.glm.ma <- glm(y.vec ~ T.vec + X.mat[,j], family = binomial(link="logit"))
+    ret <- summary(fit.glm.ma)$coefficients[3,4]
+    return(ret)
+  }
+  get_marginal_pval_A <- function(j){
+    fit.glm.ma <- glm(T.vec ~ X.mat[,j], family = binomial(link="logit"))
+    ret <- summary(fit.glm.ma)$coefficients[2,4]
+    return(ret)
+  }
+  
+  p_values_marginal_Y <- sapply(1:ncol(X.mat), get_marginal_pval_Y)
+  p_values_marginal_A <- sapply(1:ncol(X.mat), get_marginal_pval_A)
+  
+  p_values_mat <- cbind(p_values_marginal_Y, p_values_marginal_A)
+  p_values_AND <- apply(p_values_mat, MARGIN = 1, max)
+  p_values_OR <- apply(p_values_mat, MARGIN = 1, min)
+  
+  varaible_idx = sprintf("X%02d",1:ncol(X.mat))
+  ls_selected <- list(
+    AND_marBHq = which(p.adjust(p_values_AND, method="BH") < FDR),
+    OR_marBHq = which(p.adjust(p_values_OR, method="BH") < FDR),
+    AND_marBYq = which(p.adjust(p_values_AND, method="BY") < FDR),
+    OR_marBYq = which(p.adjust(p_values_OR, method="BY") < FDR)
+  )
+  
+  ret1 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$AND_marBHq])
+  ret2 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$OR_marBHq])
+  ret3 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$AND_marBYq])
+  ret4 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$OR_marBYq])
+  
+  ret <- c(
+    c(unlist(ret1), as.numeric(1:ncol(X.mat) %in% ls_selected$AND_marBHq)),
+    c(unlist(ret2), as.numeric(1:ncol(X.mat) %in% ls_selected$OR_marBHq)),
+    c(unlist(ret3), as.numeric(1:ncol(X.mat) %in% ls_selected$AND_marBYq)),
+    c(unlist(ret4), as.numeric(1:ncol(X.mat) %in% ls_selected$OR_marBYq))
+  )
+  
+  return(ret)
+}
+
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.adj_marQ.boot.01 <- boot(data=df_proc, statistic=func_for_boot,R=n_boot,FDR=0.1,
+                             parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_marQ.boot.02 <- boot(data=df_proc, statistic=func_for_boot,R=n_boot,FDR=0.2,
+                             parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_marQ.boot.03 <- boot(data=df_proc, statistic=func_for_boot,R=n_boot,FDR=0.3,
+                             parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+# fit.adj_marQ.boot.01
+matrix(colMeans(fit.adj_marQ.boot.01$t),67)
+
+```
+
+
+## Full model q-value
+
+```{r, fig.width=10, fig.height=5}
+
+# boot
+# dat <- df_proc; idx=sample(1:nrow(df_proc),nrow(df_proc),replace = TRUE); FDR=0.1
+func_for_boot <- function(dat,idx,FDR){
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+  
+  fit.glm.Y <- glm(y.vec ~ T.vec + X.mat, family = binomial(link="logit"))
+  fit.glm.A <- glm(T.vec ~ X.mat, family = binomial(link="logit"))
+  
+  p_values_full_Y <- summary(fit.glm.Y)$coefficients[3:(ncol(X.mat)+2),4]
+  p_values_full_A <- summary(fit.glm.A)$coefficients[2:(ncol(X.mat)+1),4]
+  
+  p_values_mat <- cbind(p_values_full_Y, p_values_full_A)
+  p_values_AND <- apply(p_values_mat, MARGIN = 1, max)
+  p_values_OR <- apply(p_values_mat, MARGIN = 1, min)
+  
+  varaible_idx = sprintf("X%02d",1:ncol(X.mat))
+  ls_selected <- list(
+    AND_fullBHq = which(p.adjust(p_values_AND, method="BH") < FDR),
+    OR_fullBHq = which(p.adjust(p_values_OR, method="BH") < FDR),
+    AND_fullBYq = which(p.adjust(p_values_AND, method="BY") < FDR),
+    OR_fullBYq = which(p.adjust(p_values_OR, method="BY") < FDR)
+  )
+    
+  ret1 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$AND_fullBHq])
+  ret2 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$OR_fullBHq])
+  ret3 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$AND_fullBYq])
+  ret4 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected$OR_fullBYq])
+  
+  ret <- c(
+    c(unlist(ret1), as.numeric(1:ncol(X.mat) %in% ls_selected$AND_fullBHq)),
+    c(unlist(ret2), as.numeric(1:ncol(X.mat) %in% ls_selected$OR_fullBHq)),
+    c(unlist(ret3), as.numeric(1:ncol(X.mat) %in% ls_selected$AND_fullBYq)),
+    c(unlist(ret4), as.numeric(1:ncol(X.mat) %in% ls_selected$OR_fullBYq))
+  )
+  
+  return(ret)
+}
+
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.adj_fullQ.boot.01 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.1,
+                              R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_fullQ.boot.02 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.2,
+                              R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_fullQ.boot.03 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.3,
+                              R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+matrix(colMeans(fit.adj_fullQ.boot.01$t),67)
+```
+
+
+
+
+## DS
+
+```{r, fig.width=10, fig.height=5}
+
+func_for_boot <- function(dat,idx,FDR){
+  source("../../src/utils.R")
+  source("../../src/DataSplit.R")
+  
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+  T.vec.num <- as.numeric(T.vec) - 1
+  y.vec.num <- as.numeric(y.vec) - 1
+  
+  glm(y.vec.num ~ T.vec.num + X.mat, family = binomial(link="logit"))
+  glm(T.vec.num ~ X.mat, family = binomial(link="logit"))
+  
+  ls_selected_DS <- SelConf_DS_compare_mirror(X.mat,T.vec.num,y.vec.num,
+                                              family_Y="binomial", method="glm",
+                                              tgt_FDR = FDR, n_grid=1000)
+  
+  items <- c("AND_Paired_sum_NA_NA_NA","OR_Paired_sum_NA_NA_NA",
+             "AND_Unified_product_min_sgn_sgn","OR_Unified_product_rad_cos_NA")
+  
+  ret1 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_DS[[items[1]]]])
+  ret2 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_DS[[items[2]]]])
+  ret3 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_DS[[items[3]]]])
+  ret4 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_DS[[items[4]]]])
+  
+  ret <- c(
+    c(unlist(ret1), as.numeric(1:ncol(X.mat) %in% ls_selected_DS[[items[1]]])),
+    c(unlist(ret2), as.numeric(1:ncol(X.mat) %in% ls_selected_DS[[items[2]]])),
+    c(unlist(ret3), as.numeric(1:ncol(X.mat) %in% ls_selected_DS[[items[3]]])),
+    c(unlist(ret4), as.numeric(1:ncol(X.mat) %in% ls_selected_DS[[items[4]]]))
+  )
+  
+  return(ret)
+}
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.adj_DS.boot.01 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.1,
+                           R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_DS.boot.02 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.2,
+                           R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_DS.boot.03 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.3,
+                           R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+matrix(colMeans(fit.adj_DS.boot.03$t),67)
+
+```
+
+
+
+## MDS
+
+```{r, fig.width=10, fig.height=5}
+
+func_for_boot <- function(dat,idx,FDR){
+  source("../../src/utils.R")
+  source("../../src/DataSplit.R")
+  library(foreach)
+  library(tidyverse)
+  
+  X.mat <- model.matrix(as.formula(~ .), data = dat[idx,-c(1,2)])
+  X.mat <- X.mat[,-c(1)]
+  T.vec <- dat[idx,]$RHC
+  y.vec <- dat[idx,]$death_30days
+  T.vec.num <- as.numeric(T.vec) - 1
+  y.vec.num <- as.numeric(y.vec) - 1
+  
+  ls_selected_MDS <- SelConf_MDS_compare_mirror(X.mat,T.vec.num,y.vec.num,
+                                               family_Y="binomial", method="glm",
+                                               tgt_FDR = FDR, n_grid=1000)
+  
+  items <- c("AND_Paired_sum_NA_NA_NA","OR_Paired_sum_NA_NA_NA",
+             "AND_Unified_product_min_sgn_sgn","OR_Unified_product_rad_cos_NA")
+  
+  ret1 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_MDS[[items[1]]]])
+  ret2 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_MDS[[items[2]]]])
+  ret3 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_MDS[[items[3]]]])
+  ret4 <- estimate_eff_mat(y=y.vec, Trt=T.vec, X=X.mat[,ls_selected_MDS[[items[4]]]])
+  
+  ret <- c(
+    c(unlist(ret1), as.numeric(1:ncol(X.mat) %in% ls_selected_MDS[[items[1]]])),
+    c(unlist(ret2), as.numeric(1:ncol(X.mat) %in% ls_selected_MDS[[items[2]]])),
+    c(unlist(ret3), as.numeric(1:ncol(X.mat) %in% ls_selected_MDS[[items[3]]])),
+    c(unlist(ret4), as.numeric(1:ncol(X.mat) %in% ls_selected_MDS[[items[4]]]))
+  )
+
+  return(ret)
+}
+
+cl=makeCluster(n_cores)
+clusterExport(cl, varlist = c("estimate_eff_mat"))
+fit.adj_MDS.boot.01 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.1,
+                            R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_MDS.boot.02 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.2,
+                            R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+fit.adj_MDS.boot.03 <- boot(data=df_proc, statistic=func_for_boot,FDR=0.3,
+                            R=n_boot, parallel = "snow", ncpus=n_cores, cl = cl)
+stopCluster(cl)
+
+matrix(colMeans(fit.adj_MDS.boot.03$t),67)
+
+```
+
+
+
+## ワークスペースを保存
+
+```{r}
+
+save.image("./checkpoint/checkpoint_20240422.RData")
+load("./checkpoint/checkpoint_20240422.RData")
+
+```
+
+
+## 解析結果を可視化
+
+```{r}
+
+X.mat <- model.matrix(as.formula(~ .), data = df_proc[,-c(1,2)])
+X.mat <- X.mat[,-c(1)]
+T.vec <- df_proc$RHC
+y.vec <- df_proc$death_30days
+
+
+dimX <- dim(X.mat)[2]
+
+
+
+df_selected_01 <- data.frame(
+  var_idx = 1:dimX,
+  var_names = colnames(X.mat),
+  FDR = 0.1,
+  fullQ_BH_AND = (1:dimX %in% ls_selected_fullQ$AND_fullBHq)*1,
+  fullQ_BH_OR = (1:dimX %in% ls_selected_fullQ$OR_fullBHq)*1,
+  fullQ_BY_AND = (1:dimX %in% ls_selected_fullQ$AND_fullBYq)*1,
+  fullQ_BY_OR = (1:dimX %in% ls_selected_fullQ$OR_fullBYq)*1,
+  marQ_BH_AND = (1:dimX %in% ls_selected_marQ$AND_marBHq)*1,
+  marQ_BH_OR = (1:dimX %in% ls_selected_marQ$OR_marBHq)*1,
+  marQ_BY_AND = (1:dimX %in% ls_selected_marQ$AND_marBYq)*1,
+  marQ_BY_OR = (1:dimX %in% ls_selected_marQ$OR_marBYq)*1,
+  DS_Paired_AND = (1:dimX %in% ls_selected_DS$AND_Paired_sum_NA_NA_NA)*1,
+  DS_Paired_OR = (1:dimX %in% ls_selected_DS$OR_Paired_sum_NA_NA_NA)*1,
+  DS_Unified_AND = (1:dimX %in% ls_selected_DS$AND_Unified_product_min_sgn_sgn)*1,
+  DS_Unified_OR = (1:dimX %in% ls_selected_DS$OR_Unified_product_rad_cos_NA)*1,
+  MDS_Paired_AND = (1:dimX %in% ls_selected_MDS$AND_Paired_sum_NA_NA_NA)*1,
+  MDS_Paired_OR = (1:dimX %in% ls_selected_MDS$OR_Paired_sum_NA_NA_NA)*1,
+  MDS_Unified_AND = (1:dimX %in% ls_selected_MDS$AND_Unified_product_min_sgn_sgn)*1,
+  MDS_Unified_OR = (1:dimX %in% ls_selected_MDS$OR_Unified_product_rad_cos_NA)*1
+)
+
+df_selected_02 <- data.frame(
+  var_idx = 1:dimX,
+  var_names = colnames(X.mat),
+  FDR = 0.2,
+  fullQ_BH_AND = (1:dimX %in% ls_selected_fullQ02$AND_fullBHq)*1,
+  fullQ_BH_OR = (1:dimX %in% ls_selected_fullQ02$OR_fullBHq)*1,
+  fullQ_BY_AND = (1:dimX %in% ls_selected_fullQ02$AND_fullBYq)*1,
+  fullQ_BY_OR = (1:dimX %in% ls_selected_fullQ02$OR_fullBYq)*1,
+  marQ_BH_AND = (1:dimX %in% ls_selected_marQ02$AND_marBHq)*1,
+  marQ_BH_OR = (1:dimX %in% ls_selected_marQ02$OR_marBHq)*1,
+  marQ_BY_AND = (1:dimX %in% ls_selected_marQ02$AND_marBYq)*1,
+  marQ_BY_OR = (1:dimX %in% ls_selected_marQ02$OR_marBYq)*1,
+  DS_Paired_AND = (1:dimX %in% ls_selected_DS02$AND_Paired_sum_NA_NA_NA)*1,
+  DS_Paired_OR = (1:dimX %in% ls_selected_DS02$OR_Paired_sum_NA_NA_NA)*1,
+  DS_Unified_AND = (1:dimX %in% ls_selected_DS02$AND_Unified_product_min_sgn_sgn)*1,
+  DS_Unified_OR = (1:dimX %in% ls_selected_DS02$OR_Unified_product_rad_cos_NA)*1,
+  MDS_Paired_AND = (1:dimX %in% ls_selected_MDS02$AND_Paired_sum_NA_NA_NA)*1,
+  MDS_Paired_OR = (1:dimX %in% ls_selected_MDS02$OR_Paired_sum_NA_NA_NA)*1,
+  MDS_Unified_AND = (1:dimX %in% ls_selected_MDS02$AND_Unified_product_min_sgn_sgn)*1,
+  MDS_Unified_OR = (1:dimX %in% ls_selected_MDS02$OR_Unified_product_rad_cos_NA)*1
+)
+
+df_selected <- rbind(df_selected_01,df_selected_02)
+
+write_csv(df_selected, "./output/selected_varaibles.csv")
+
+df_long <- df_selected %>%
+  pivot_longer(cols=all_of(colnames(df_selected[,-c(1,2,3)]))) %>% 
+  separate(name, into = c("algorithm","method","criteria"), sep = "_", remove = FALSE) %>% 
+  mutate(
+    xlabel = ifelse(algorithm %in% c("fullQ","marQ")
+      , sprintf("%s%s (%s)", method, "q",
+                ifelse(algorithm=="fullQ","full","marginal"))
+      , sprintf("%s (%s)", algorithm, method)
+    ),
+    xorder = case_when(
+      algorithm == "marQ" ~ 4,
+      algorithm == "fullQ" ~ 3,
+      algorithm == "DS" ~ 2,
+      algorithm == "MDS" ~ 1
+    )
+  ) %>% 
+  arrange(criteria, xorder, desc(method))
+df_long$xlabel <- factor(df_long$xlabel, levels=unique(df_long$xlabel))
+
+
+
+gg1 <- df_long %>% 
+  filter(criteria == "OR") %>% 
+  ggplot(aes(x=var_idx,y=factor(FDR,levels=c(0.2,0.1)),fill=factor(value))) +
+  geom_tile(col="white") + 
+  facet_grid(xlabel ~ ., switch = "y") +
+  scale_fill_manual(values=c("transparent","gray50")) +
+  scale_x_continuous(limits = c(0.5,58.5), breaks = c(1,5,10,15,20,25,30,35,40,45,50,55,58)) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    text = element_text(size=18),
+    # axis.text.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text.y.left = element_text(angle = 0, hjust = 1),
+    strip.placement = "outside",
+    strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+  ) +
+  labs(x=NULL, y="Union set approach")
+  
+
+gg2  <- df_long %>% 
+  filter(criteria == "AND") %>% 
+  ggplot(aes(x=var_idx,y=factor(FDR,levels=c(0.2,0.1)),fill=factor(value))) +
+  geom_tile(col="white") + 
+  facet_grid(xlabel ~ ., switch = "y") +
+  scale_fill_manual(values=c("transparent","gray50")) +
+  scale_x_continuous(limits = c(0.5,58.5), breaks = c(1,5,10,15,20,25,30,35,40,45,50,55,58)) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    text = element_text(size=18),
+    # axis.text.x = element_blank(),
+    # axis.ticks.x = element_blank(),
+    legend.position = "none",
+    strip.text.y.left = element_text(angle = 0, hjust = 1),
+    strip.placement = "outside",
+    strip.background = element_blank() # ファセットのタイトルバックグラウンドを消す
+  ) +
+  labs(x=NULL, y="Minimal set approach")
+
+
+
+gg <- grid.arrange(gg1, gg2, ncol=1)
+
+ggsave("./fig/fig_rhc_selected.pdf",gg, device="pdf",
+       dpi=500, units = "mm", width = 240, height = 200)
+
+```
+
+
+## 解析結果を可視化（bootstrap）
+
+```{r, warning=FALSE}
+getBootCI <- function(boot.out, valnames){
+  df_bootci <- NULL
+  for (j in 1:dim(boot.out$t)[2]) {
+    bci <- boot.ci(boot.out, type="perc", index = j)
+    df_tmp <- data.frame(
+      vname = valnames[j],
+      estimate = bci$t0,
+      CIL = bci$percent[4],
+      CIU = bci$percent[5]
+    )
+    df_bootci <- rbind(df_bootci, df_tmp)
+  }
+  df_bootci$measure_method <- names(boot.out$t0)
+  return(df_bootci)
+}
+
+valnames = rep("unadjusted_NA_NA_XXX", length(fit.unadj.boot$t0))
+df_boot_unadj_01 <- getBootCI(fit.unadj.boot, valnames) %>% mutate(FDR=0.1)
+df_boot_unadj_02 <- getBootCI(fit.unadj.boot, valnames) %>% mutate(FDR=0.2)
+
+
+valnames = rep("adjusted_full_NA_XXX", length(fit.adj_full.boot$t0))
+df_boot_full_01 <- getBootCI(fit.adj_full.boot, valnames) %>% mutate(FDR=0.1)
+df_boot_full_02 <- getBootCI(fit.adj_full.boot, valnames) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("BHq","BYq"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_marQ", s2, s1, sep="_"))
+df_boot_marQ_01 <- getBootCI(fit.adj_marQ.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_marQ_02 <- getBootCI(fit.adj_marQ.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("BHq","BYq"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_fullQ", s2, s1, sep="_"))
+df_boot_fullQ_01 <- getBootCI(fit.adj_fullQ.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_fullQ_02 <- getBootCI(fit.adj_fullQ.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("Paired","Unified"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_DS", s2, s1, sep="_"))
+df_boot_DS_01 <- getBootCI(fit.adj_DS.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_DS_02 <- getBootCI(fit.adj_DS.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+vname_grid <- expand_grid(
+  s1 = rep(c("AND", "OR"), 3), s2 = rep(c("Paired","Unified"), 3)
+  ) %>%
+  arrange(s2, s1) %>% 
+  mutate(vname = paste("adjusted_MDS", s2, s1, sep="_"))
+df_boot_MDS_01 <- getBootCI(fit.adj_MDS.boot, vname_grid$vname) %>% mutate(FDR=0.1)
+df_boot_MDS_02 <- getBootCI(fit.adj_MDS.boot02, vname_grid$vname) %>% mutate(FDR=0.2)
+
+# measure="RR";method="IPW"
+getEstimates <- function(measure, method){
+  if (measure == "RD") {
+    x_axis_label = "Risk difference with bootstrap 95%CI"
+  } else if (measure == "RR"){
+    x_axis_label = "Risk ratio with bootstrap 95%CI"
+  } else if (measure == "OR"){
+    x_axis_label = "Odds ratio with bootstrap 95%CI"
+  }
+
+  df_blank1_01 = data.frame(vname="blank_NA_NA_XXX",estimate=NA,CIL=NA,CIU=NA,FDR=0.1,
+                         measure_method=paste(measure, method, sep="_"))
+  df_blank1_02 = data.frame(vname="blank_NA_NA_XXX",estimate=NA,CIL=NA,CIU=NA,FDR=0.2,
+                         measure_method=paste(measure, method, sep="_"))
+  
+  df_blank2_01 = data.frame(vname="blank_NA_NA_OR",estimate=NA,CIL=NA,CIU=NA,FDR=0.1,
+                         measure_method=paste(measure, method, sep="_"))
+  df_blank2_02 = data.frame(vname="blank_NA_NA_OR",estimate=NA,CIL=NA,CIU=NA,FDR=0.2,
+                         measure_method=paste(measure, method, sep="_"))
+
+  df_gg <- rbind(
+    df_boot_unadj_01, df_boot_full_01,df_blank1_01,
+    df_boot_marQ_01, df_boot_fullQ_01,
+    df_boot_DS_01, df_boot_MDS_01, df_blank2_01,
+    df_boot_unadj_02, df_boot_full_02,df_blank1_02,
+    df_boot_marQ_02, df_boot_fullQ_02,
+    df_boot_DS_02, df_boot_MDS_02, df_blank2_02
+    ) %>%
+    separate(vname, into = paste0("type",1:4), sep="_", remove = FALSE) %>%
+    separate(measure_method, into = c("type5","type6"), sep="_", remove = FALSE) %>%
+    arrange(desc(type4)) %>%
+    filter(type5 == measure, type6 == method) %>% 
+    mutate(ylabel = case_when(
+      type1 == "blank" & type4 == "XXX" ~ " ",
+      type1 == "blank" & type4 == "OR" ~ "  ",
+      type1 == "unadjusted" ~ "Unadjusted",
+      type2 == "original" ~ "Adjusted (original covariates)",
+      type2 == "full" ~ "Adjusted (full covariates)",
+      type2 == "marQ" ~ sprintf("Adjusted (%s, %s) for %s", type3, "marginal", type4),
+      type2 == "fullQ" ~ sprintf("Adjusted (%s, %s) for %s", type3, "full", type4),
+      type2 == "DS" ~ sprintf("Adjusted (%s, %s) for %s", type2, type3, type4),
+      type2 == "MDS" ~ sprintf("Adjusted (%s, %s) for %s", type2, type3, type4)
+    ))
+  df_gg$ylabel <- factor(df_gg$ylabel, levels=rev(df_gg$ylabel[df_gg$FDR==0.1]))
+
+  gg <- df_gg %>%
+    ggplot(aes(y=ylabel)) +
+    geom_point(aes(x=estimate)) +
+    geom_errorbar(aes(xmin=CIL, xmax=CIU), width=0.25) +
+    # geom_vline(aes(xintercept = df_gg[df_gg$type2 == "full","estimate"]),
+    #            col="red", linetype="dashed")+
+    facet_grid(. ~ FDR) +
+    theme_bw() +
+    theme(
+      text = element_text(size=20)
+    ) +
+    labs(x=x_axis_label, y=NULL)
+  
+  ggsave(sprintf("./fig/fig_rhc_%s_%s.pdf", measure, method), gg, device="pdf",
+         dpi=500, units = "mm", width = 240, height = 160)
+  
+}
+
+getEstimates(measure="RR", method="IPW")
+
+```
+
+
+## 解析結果を可視化（bootstrap）
+
+```{r, warning=FALSE}
+
+for (measure in c("RD","RR","OR")) {
+  for (method in c("Std", "IPW", "AIPW")) {
+    getEstimates(measure=measure, method=method)
+  }
+}
+
+```
+
+
